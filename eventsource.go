@@ -12,17 +12,20 @@ import (
 )
 
 type eventMessage struct {
-	id    string
-	event string
-	data  string
+	id        string
+	event     string
+	data      string
+	_clientId string
 }
 
 type retryMessage struct {
-	retry time.Duration
+	_clientId string
+	retry     time.Duration
 }
 
 type eventSource struct {
 	customHeadersFunc func(*http.Request) [][]byte
+	clientIDFunc      func(*http.Request) string
 
 	sink           chan message
 	staled         chan *consumer
@@ -62,6 +65,8 @@ type Settings struct {
 	//
 	// The default is false.
 	Gzip bool
+
+	ClientIDFunc func(*http.Request) string
 }
 
 func DefaultSettings() *Settings {
@@ -80,9 +85,11 @@ type EventSource interface {
 
 	// send message to all consumers
 	SendEventMessage(data, event, id string)
-
 	// send retry message to all consumers
 	SendRetryMessage(duration time.Duration)
+
+	SendMessageToClient(clientID, data, event, id string)
+	SendRetryMessageToClient(clientID string, duration time.Duration)
 
 	// consumers count
 	ConsumersCount() int
@@ -92,6 +99,7 @@ type EventSource interface {
 }
 
 type message interface {
+	clientID() string
 	// The message to be sent to clients
 	prepareMessage() []byte
 }
@@ -99,7 +107,7 @@ type message interface {
 func (m *eventMessage) prepareMessage() []byte {
 	var data bytes.Buffer
 	if len(m.id) > 0 {
-		data.WriteString(fmt.Sprintf("id: %s\n", strings.Replace(m.id, "\n", "", -1)))
+		data.WriteString(fmt.Sprintf("ID: %s\n", strings.Replace(m.id, "\n", "", -1)))
 	}
 	if len(m.event) > 0 {
 		data.WriteString(fmt.Sprintf("event: %s\n", strings.Replace(m.event, "\n", "", -1)))
@@ -114,22 +122,29 @@ func (m *eventMessage) prepareMessage() []byte {
 	return data.Bytes()
 }
 
+func (m *eventMessage) clientID() string {
+	return m._clientId
+}
+
 func controlProcess(es *eventSource) {
 	for {
 		select {
 		case em := <-es.sink:
-			message := em.prepareMessage()
+			msg := em.prepareMessage()
+			clientID := em.clientID()
 			func() {
 				es.consumersLock.RLock()
 				defer es.consumersLock.RUnlock()
 
 				for e := es.consumers.Front(); e != nil; e = e.Next() {
 					c := e.Value.(*consumer)
-
-					// Only send this message if the consumer isn't staled
+					if len(clientID) > 0 && c.ID != clientID {
+						continue
+					}
+					// Only send this msg if the consumer isn't staled
 					if !c.staled {
 						select {
-						case c.in <- message:
+						case c.in <- msg:
 						default:
 						}
 					}
@@ -205,6 +220,7 @@ func New(settings *Settings, customHeadersFunc func(*http.Request) [][]byte) Eve
 	es.idleTimeout = settings.IdleTimeout
 	es.closeOnTimeout = settings.CloseOnTimeout
 	es.gzip = settings.Gzip
+	es.clientIDFunc = settings.ClientIDFunc
 	go controlProcess(es)
 	return es
 }
@@ -215,7 +231,11 @@ func (es *eventSource) Close() {
 
 // ServeHTTP implements http.Handler interface.
 func (es *eventSource) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
-	cons, err := newConsumer(resp, req, es)
+	id := ""
+	if es.clientIDFunc != nil {
+		id = es.clientIDFunc(req)
+	}
+	cons, err := newConsumer(id, resp, req, es)
 	if err != nil {
 		log.Print("Can't create connection to a consumer: ", err)
 		return
@@ -228,8 +248,23 @@ func (es *eventSource) sendMessage(m message) {
 }
 
 func (es *eventSource) SendEventMessage(data, event, id string) {
-	em := &eventMessage{id, event, data}
+	em := &eventMessage{id: id, event: event, data: data}
 	es.sendMessage(em)
+}
+
+func (es *eventSource) SendMessageToClient(clientID, data, event, id string) {
+	if es.clientIDFunc == nil {
+		panic("clientIDFunc is not set")
+	}
+	if len(clientID) == 0 {
+		panic("clientID can't be empty")
+	}
+	em := &eventMessage{id: id, event: event, data: data, _clientId: clientID}
+	es.sendMessage(em)
+}
+
+func (m *retryMessage) clientID() string {
+	return m._clientId
 }
 
 func (m *retryMessage) prepareMessage() []byte {
@@ -237,7 +272,17 @@ func (m *retryMessage) prepareMessage() []byte {
 }
 
 func (es *eventSource) SendRetryMessage(t time.Duration) {
-	es.sendMessage(&retryMessage{t})
+	es.sendMessage(&retryMessage{retry: t})
+}
+
+func (es *eventSource) SendRetryMessageToClient(clientID string, duration time.Duration) {
+	if es.clientIDFunc == nil {
+		panic("clientIDFunc is not set")
+	}
+	if len(clientID) == 0 {
+		panic("clientID can't be empty")
+	}
+	es.sendMessage(&retryMessage{retry: duration, _clientId: clientID})
 }
 
 func (es *eventSource) ConsumersCount() int {

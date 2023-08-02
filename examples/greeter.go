@@ -1,10 +1,11 @@
 package main
 
 import (
-	"gopkg.in/antage/eventsource.v1"
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/0xDeSchool/eventsource"
 )
 
 func main() {

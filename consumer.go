@@ -10,6 +10,7 @@ import (
 )
 
 type consumer struct {
+	ID     string
 	conn   io.WriteCloser
 	es     *eventSource
 	in     chan []byte
@@ -39,13 +40,14 @@ func (gc gzipConn) Close() error {
 	return gc.Conn.Close()
 }
 
-func newConsumer(resp http.ResponseWriter, req *http.Request, es *eventSource) (*consumer, error) {
+func newConsumer(id string, resp http.ResponseWriter, req *http.Request, es *eventSource) (*consumer, error) {
 	conn, _, err := resp.(http.Hijacker).Hijack()
 	if err != nil {
 		return nil, err
 	}
 
 	consumer := &consumer{
+		ID:     id,
 		conn:   conn,
 		es:     es,
 		in:     make(chan []byte, 10),
